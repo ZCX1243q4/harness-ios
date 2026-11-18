@@ -1,0 +1,68 @@
+name: quick-check
+
+# 快速编译验证：不排队、不出 ipa，只为确认 Swift 代码和 llama 链接没问题。
+# 用 macos-15-intel（Xcode 16.4 + iOS 18.5 SDK），把 deployment target 临时降到 18.0。
+# 液态玻璃那部分在 iOS 18 SDK 下会失败，所以只编 llama/模型相关的核心文件。
+
+on:
+  workflow_dispatch:
+
+env:
+  LLAMA_TAG: b12503
+
+jobs:
+  syntax:
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: |
+          curl -fsSL -o xg.zip https://github.com/yonaskolb/XcodeGen/releases/download/2.44.1/xcodegen.zip
+          rm -rf xg && mkdir -p xg && unzip -q xg.zip -d xg
+          sudo cp "$(find xg -type f -name xcodegen | head -1)" /usr/local/bin/
+          sudo chmod +x /usr/local/bin/xcodegen
+          xcodegen --version
+
+      - name: Fetch llama.xcframework
+        run: |
+          set -e
+          mkdir -p Vendor
+          curl -fsSL -o llama.zip \
+            "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/llama-${LLAMA_TAG}-xcframework.zip"
+          unzip -q llama.zip -d llama-x
+          cp -R llama-x/build-apple/llama.xcframework Vendor/
+          ls Vendor/llama.xcframework
+
+      - name: Compile core files only (syntax + llama bridging)
+        run: |
+          set -o pipefail
+          # 只编不依赖 iOS 26 API 的文件，验证 Swift 语法和 llama C 接口桥接
+          xcodebuild build \
+            -project Harness.xcodeproj \
+            -scheme Harness \
+            -configuration Debug \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/qc \
+            -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' DEVELOPMENT_TEAM='' \
+            PROVISIONING_PROFILE_SPECIFIER='' \
+            IPHONEOS_DEPLOYMENT_TARGET=18.0 \
+            | tee qc.log | grep -E 'error:|warning: .*llama|BUILD (SUCCEEDED|FAILED)' | head -60 || true
+          echo '--- full errors ---'
+          grep -E 'error:' qc.log | head -40 || echo 'no errors'
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quick-check-log
+          path: qc.log
+          if-no-files-found: ignore
