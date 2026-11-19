@@ -1,0 +1,97 @@
+name: build-ipa
+
+# 出未签名 ipa。为了快：不装 Homebrew，XcodeGen 和 llama.xcframework 都直接下二进制。
+# macos-15-intel：Xcode 16.4 + iOS 18.5 SDK，不排队。液态玻璃和 FoundationModels 用 canImport 隔离。
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  LLAMA_TAG: b12503
+
+jobs:
+  unsigned:
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i iphoneos || true
+
+      - name: Install XcodeGen (binary, no brew)
+        run: |
+          set -e
+          curl -fsSL -o xcodegen.zip \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.44.1/xcodegen.zip
+          rm -rf xg && mkdir -p xg
+          unzip -q xcodegen.zip -d xg
+          BIN="$(find xg -type f -name xcodegen | head -1)"
+          if [ -z "$BIN" ]; then echo 'xcodegen not found' >&2; exit 1; fi
+          sudo cp "$BIN" /usr/local/bin/
+          sudo chmod +x /usr/local/bin/xcodegen
+          xcodegen --version
+
+      - name: Fetch llama.xcframework
+        run: |
+          set -e
+          if [ -d Vendor/llama.xcframework ]; then
+            echo 'already present, skip'; exit 0
+          fi
+          mkdir -p Vendor
+          curl -fsSL -o llama.zip \
+            "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/llama-${LLAMA_TAG}-xcframework.zip"
+          unzip -q llama.zip -d llama-x
+          cp -R llama-x/build-apple/llama.xcframework Vendor/
+          # 不要删 dSYMs/macos slice：Info.plist 里声明了它们，删了 Xcode 会报
+          # "Missing path ... as defined by DebugSymbolsPath"。完整保留最稳。
+          ls Vendor/llama.xcframework
+          du -sh Vendor/llama.xcframework
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build without any signing
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project Harness.xcodeproj \
+            -scheme Harness \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/dd \
+            -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            DEVELOPMENT_TEAM='' \
+            PROVISIONING_PROFILE_SPECIFIER='' \
+            | tee build.log | tail -80
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Package unsigned ipa
+        run: |
+          set -e
+          chmod +x scripts/make-unsigned-ipa.sh
+          mkdir -p dist
+          ./scripts/make-unsigned-ipa.sh \
+            "build/dd/Build/Products/Release-iphoneos/Harness.app" \
+            dist/Harness-unsigned.ipa
+          ls -lh dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Harness-unsigned
+          path: dist/Harness-unsigned.ipa
+          if-no-files-found: error

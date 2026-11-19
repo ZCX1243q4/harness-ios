@@ -1,0 +1,23 @@
+# 证书与签名材料，永远不要提交
+secrets/
+*.p12
+*.cer
+*.pem
+*.mobileprovision
+*.provisionprofile
+密码.txt
+
+# 第三方二进制由 CI 下载，不进仓库
+Vendor/
+
+# 构建产物
+build/
+dist/
+DerivedData/
+*.ipa
+*.xcarchive
+Harness.xcodeproj/
+
+# 临时
+*.log
+.DS_Store
